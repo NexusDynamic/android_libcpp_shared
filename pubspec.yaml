@@ -1,11 +1,9 @@
 name: android_libcpp_shared
-description: "A new Dart FFI package project."
+description: "Dart / flutter package for Android to add the libc++_shared.so STL C++ shared runtime library to your app"
 version: 0.1.0
 
 environment:
-  sdk: ^3.12.0-247.0.dev
-
-resolution: workspace
+  sdk: ^3.9.0
 
 dependencies:
   code_assets: ^1.0.0
@@ -14,5 +12,5 @@ dependencies:
   native_toolchain_c: ^0.17.6
 
 dev_dependencies:
-  flutter_lints: ^6.0.0
+  lints: ^6.1.0
   test: ^1.28.0
