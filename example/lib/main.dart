@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:android_libcpp_shared/android_libcpp_shared.dart';
 import 'dart:ffi' as ffi;
 
 void main() {
@@ -29,7 +30,7 @@ class _MyHomePageState extends State<MyHomePage> {
   @override
   void initState() {
     super.initState();
-    _lib = ffi.DynamicLibrary.open('libc++_shared.so');
+    _lib = libCppShared;
   }
 
   // Example of using a foreign function from libc++_shared.so.
