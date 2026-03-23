@@ -1,5 +1,7 @@
 # android_libcpp_shared
 
+[![Pub Publisher](https://img.shields.io/pub/publisher/android_libcpp_shared?style=flat-square)](https://pub.dev/publishers/zeyus.com/packages) [![Pub Version](https://img.shields.io/pub/v/android_libcpp_shared)](https://pub.dev/packages/android_libcpp_shared) 
+
 Dart / flutter package for Android to add the libc++_shared.so STL C++ shared runtime library to your app
 
 # Usage
