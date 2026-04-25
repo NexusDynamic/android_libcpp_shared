@@ -378,10 +378,9 @@ class NDKLocator {
 
   /// Expands a path template with environment variables and glob patterns.
   static List<FileSystemEntity> expandPath(String pathTemplate) {
-    final homeDirectory =
-        Platform.isWindows
-            ? Platform.environment['USERPROFILE']
-            : Platform.environment['HOME'];
+    final homeDirectory = Platform.isWindows
+        ? Platform.environment['USERPROFILE']?.replaceAll('\\', '/')
+        : Platform.environment['HOME'];
 
     if (homeDirectory == null) {
       throw Exception(
