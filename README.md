@@ -16,10 +16,27 @@ Add the package to your pubspec.yaml dependencies:
 
 ```yaml
 dependencies:
-  android_libcpp_shared: ^0.1.0
+  android_libcpp_shared: ^0.2.0
 ```
 
 You don't need to import anything into your Dart code, the dependency is sufficient to bundle the native library with your app. The package does include an optional API if you want to directly use functions from `libc++_shared.so` using `dart:ffi`, but this is not required to include the library in your app.
+
+### Gradle configuration
+
+Consider adding `--enable-native-access=ALL-UNNAMED` to `org.gradle.jvmargs` in your `gradle.properties` file. This will help make sure that future versions of gradle / java won't break with restrictod methods.
+
+Your entire `android/gradle.properties` file should look something like this (along with any additional properties you have added):
+
+```gradle
+org.gradle.jvmargs=-Xmx8G -XX:MaxMetaspaceSize=4G -XX:ReservedCodeCacheSize=512m -XX:+HeapDumpOnOutOfMemoryError --enable-native-access=ALL-UNNAMED
+android.useAndroidX=true
+# This builtInKotlin flag was added automatically by Flutter migrator
+android.builtInKotlin=false
+# This newDsl flag was added automatically by Flutter migrator
+android.newDsl=false
+```
+
+Once Flutter has migrated to a newer gradle / android gradle plugin version, these instructions may change.
 
 ## Optional API
 

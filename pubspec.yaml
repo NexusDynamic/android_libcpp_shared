@@ -1,6 +1,6 @@
 name: android_libcpp_shared
 description: "Dart / flutter package for Android to add the libc++_shared.so STL C++ shared runtime library to your app"
-version: 0.1.1
+version: 0.2.0
 homepage: https://zeyus.com/
 repository: https://github.com/NexusDynamic/android_libcpp_shared
 issue_tracker: https://github.com/NexusDynamic/android_libcpp_shared/issues
@@ -11,9 +11,9 @@ environment:
 dependencies:
   code_assets: ^1.0.0
   glob: ^2.1.3
-  hooks: ^1.0.0
+  hooks: ^2.0.2
   logging: ^1.3.0
-  native_toolchain_c: ^0.18.0
+  native_toolchain_c: ^0.19.1
 
 dev_dependencies:
   lints: ^6.1.0
