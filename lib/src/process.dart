@@ -26,12 +26,15 @@ Future<ProcessResult> runProcess({
     runInShell: Platform.isWindows && workingDirectory != null,
   );
 
+  // Windows uses system encoding (e.g., GBK for Chinese), while
+  // Linux/macOS use UTF-8 for process output.
+  final encoding = Platform.isWindows ? systemEncoding : utf8;
   final stdoutFuture = process.stdout
-      .transform(utf8.decoder)
+      .transform(encoding.decoder)
       .transform(const LineSplitter())
       .forEach(stdout.writeln);
   final stderrFuture = process.stderr
-      .transform(utf8.decoder)
+      .transform(encoding.decoder)
       .transform(const LineSplitter())
       .forEach(stderr.writeln);
   await Future.wait([stdoutFuture, stderrFuture]);
