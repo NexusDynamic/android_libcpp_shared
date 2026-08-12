@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.1
+
+* Fixed NDK path resolution on Windows by using `USERPROFILE` and normalizing path separators.
+
 ## 0.2.0
 
 * Updated `native_toolchain_c` to `0.19.0`.
