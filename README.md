@@ -10,6 +10,31 @@ Dart / flutter package for Android to add the libc++_shared.so STL C++ shared ru
 
 You obviously need dart/flutter installed, but in addition you must have the Android NDK installed. This package does its best to find the NDK install location during the build hook step.
 
+### How the library is found
+
+During the build hook, `libc++_shared.so` is looked for in this order:
+
+1. An explicit override, if you have set one (see [Overriding the location](#overriding-the-location)).
+2. The NDK that the Flutter tool itself is building with, derived from the compiler in the build config.
+3. Every other NDK installation that can be found, highest version first. These come from `ndk-build` on your `PATH`, the `ANDROID_NDK`, `ANDROID_NDK_HOME`, `ANDROID_NDK_LATEST_HOME` and `ANDROID_NDK_ROOT` environment variables, `sdk.dir` / `ndk.dir` in your project's `local.properties`, the `ANDROID_HOME`, `ANDROID_SDK_ROOT` and `ANDROID_SDK_HOME` environment variables, `flutter config --android-sdk`, and the usual installation directories for your platform.
+
+A candidate is only used once it has been verified to exist and to be an ELF shared object, so an incomplete NDK installation is skipped in favour of the next one rather than producing a build that fails later. If nothing usable is found the build hook fails with the full list of NDKs considered and files checked - please include that output when reporting an issue.
+
+### Overriding the location
+
+If the library lives somewhere this package does not look, point it at the file directly in your application's `pubspec.yaml`:
+
+```yaml
+hooks:
+  user_defines:
+    android_libcpp_shared:
+      libcpp_shared_path: /path/to/libc++_shared.so
+```
+
+The `ANDROID_LIBCPP_SHARED_PATH` environment variable does the same thing. Note that Gradle reuses a long lived daemon, so a variable exported after the daemon started will not reach the build hook; the user define is not affected by that.
+
+Both settings also accept the root of an NDK installation, in which case that NDK is used in preference to any other.
+
 ## Adding the dependency
 
 Add the package to your pubspec.yaml dependencies:

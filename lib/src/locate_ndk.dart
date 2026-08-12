@@ -118,6 +118,23 @@ enum LibArch {
     }
   }
 
+  /// Converts this LibArch to the corresponding Android ABI directory name, as
+  /// used by `sources/cxx-stl/llvm-libc++/libs/` in NDK r22 and older.
+  String toAbi() {
+    switch (this) {
+      case LibArch.arm:
+        return 'armeabi-v7a';
+      case LibArch.arm64:
+        return 'arm64-v8a';
+      case LibArch.x86:
+        return 'x86';
+      case LibArch.riscv64:
+        return 'riscv64';
+      case LibArch.x86_64:
+        return 'x86_64';
+    }
+  }
+
   /// Parses a string representation of a library architecture and returns the corresponding LibArch enum value.
   static LibArch? fromString(String str) {
     switch (str) {
@@ -131,6 +148,9 @@ enum LibArch {
         return LibArch.arm64;
       case 'x86':
       case 'i686':
+      // `Architecture.ia32` is how the Dart/Flutter build config names 32 bit
+      // x86, which the NDK calls `x86` / `i686`.
+      case 'ia32':
         return LibArch.x86;
       case 'riscv64':
         return LibArch.riscv64;
@@ -235,6 +255,41 @@ final class NKDVersion {
       '$major.$minor.$patch${flavor.isNotEmpty ? '-$flavor' : ''}';
 }
 
+/// The ELF magic number, `0x7F` followed by `ELF`.
+const _elfMagic = [0x7F, 0x45, 0x4C, 0x46];
+
+/// Whether the file at [uri] exists and starts with the ELF magic number.
+///
+/// The NDK ships link-time stubs and linker scripts alongside real shared
+/// objects (for example `sysroot/usr/lib/<triple>/<api>/libc++.so`, which is a
+/// plain text linker script). Those must never be bundled into an application,
+/// so every candidate is checked to be a real ELF object rather than merely
+/// present.
+bool isElfFile(Uri uri) {
+  final file = File.fromUri(uri);
+  if (!file.existsSync()) {
+    return false;
+  }
+  RandomAccessFile? handle;
+  try {
+    handle = file.openSync();
+    final magic = handle.readSync(_elfMagic.length);
+    if (magic.length != _elfMagic.length) {
+      return false;
+    }
+    for (var i = 0; i < _elfMagic.length; i++) {
+      if (magic[i] != _elfMagic[i]) {
+        return false;
+      }
+    }
+    return true;
+  } on FileSystemException {
+    return false;
+  } finally {
+    handle?.closeSync();
+  }
+}
+
 final class NDKApiLevel {
   /// The API level number
   final int level;
@@ -277,6 +332,42 @@ final class NDKTargetArchitecture {
 
   void _addApiLevel(NDKApiLevel apiLevel) {
     _apiLevels.add(apiLevel);
+  }
+
+  /// The locations `libc++_shared.so` is known to live in for this target
+  /// architecture, in order of preference.
+  ///
+  /// [ndkRoot] adds the legacy location used by NDK r22 and older, where the
+  /// STL shipped under `sources/cxx-stl/` instead of inside the sysroot.
+  ///
+  /// Note that `sysroot/usr/lib/<triple>/<api>/libc++.so` is deliberately *not*
+  /// a candidate: it is a linker script, not a shared object.
+  List<Uri> libcppSharedCandidates({Uri? ndkRoot}) => [
+    sysrootLibPath.resolve('libc++_shared.so'),
+    if (ndkRoot != null)
+      ndkRoot.resolve(
+        'sources/cxx-stl/llvm-libc++/libs/${arch.toAbi()}/libc++_shared.so',
+      ),
+  ];
+
+  /// Returns the first of [libcppSharedCandidates] that exists and is a real
+  /// ELF shared object, or `null` if there is none.
+  ///
+  /// Every path that was checked is appended to [probed], so that a failure can
+  /// be reported with the full list of locations that were ruled out.
+  Uri? resolveLibcppShared({Uri? ndkRoot, List<Uri>? probed, Logger? logger}) {
+    for (final candidate in libcppSharedCandidates(ndkRoot: ndkRoot)) {
+      probed?.add(candidate);
+      if (isElfFile(candidate)) {
+        logger?.fine('Found libc++_shared.so at ${candidate.toFilePath()}');
+        return candidate;
+      }
+      logger?.fine(
+        'No usable libc++_shared.so at ${candidate.toFilePath()} '
+        '(missing, or not an ELF shared object).',
+      );
+    }
+    return null;
   }
 
   List<NDKApiLevel> get apiLevels => List.unmodifiable(_apiLevels);
@@ -351,14 +442,22 @@ final class NDKInfo {
 }
 
 class NDKLocator {
-  static final _searchPaths = [
+  /// Well known SDK installation roots. Each is expanded to both `ndk/*` and
+  /// `ndk-bundle` when searching for NDK installations.
+  static final _sdkSearchPaths = [
     if (Platform.isLinux) ...[
-      '\$HOME/.androidsdkroot/ndk/*/', // Firebase Studio
-      '\$HOME/Android/Sdk/ndk/*/',
-      '\$HOME/Android/Sdk/ndk-bundle/',
+      '\$HOME/.androidsdkroot/', // Firebase Studio
+      '\$HOME/Android/Sdk/',
+      '\$HOME/.local/share/Android/Sdk/',
+      '/opt/android-sdk/',
+      '/usr/lib/android-sdk/',
     ],
-    if (Platform.isMacOS) ...['\$HOME/Library/Android/sdk/ndk/*/'],
-    if (Platform.isWindows) ...['\$HOME/AppData/Local/Android/Sdk/ndk/*/'],
+    if (Platform.isMacOS) ...[
+      '\$HOME/Library/Android/sdk/',
+      '/usr/local/share/android-sdk/',
+      '/opt/homebrew/share/android-commandlinetools/',
+    ],
+    if (Platform.isWindows) ...['\$HOME/AppData/Local/Android/Sdk/'],
   ];
 
   static final _ndkEnvVars = [
@@ -376,28 +475,171 @@ class NDKLocator {
 
   static final _pathExe = Platform.isWindows ? 'ndk-build.cmd' : 'ndk-build';
 
-  /// Expands a path template with environment variables and glob patterns.
-  static List<FileSystemEntity> expandPath(String pathTemplate) {
-    // Use platform-dependent environment variables for the user's home directory
-    final homeDirectory = Platform.isWindows
-        ? Platform.environment['USERPROFILE']?.replaceAll('\\', '/')
-        : Platform.environment['HOME'];
+  /// The user's home directory, or `null` if it is not set in the environment.
+  ///
+  /// Windows uses `USERPROFILE` (`HOME` is set by PowerShell but not by
+  /// `cmd.exe`), and its separators are normalised to `/` because that is what
+  /// [Glob] requires.
+  static String? homeDirectory() => Platform.isWindows
+      ? Platform.environment['USERPROFILE']?.replaceAll('\\', '/')
+      : Platform.environment['HOME'];
 
-    if (homeDirectory == null) {
+  /// Replaces `$HOME` in [pathTemplate] with the user's home directory.
+  static String expandHome(String pathTemplate) {
+    if (!pathTemplate.contains('\$HOME')) {
+      return pathTemplate;
+    }
+    final home = homeDirectory();
+    if (home == null) {
       throw Exception(
         'Failed to find home directory. Please ensure that the HOME environment variable is set. On Windows, the USERPROFILE environment variable should be set instead.',
       );
     }
+    return pathTemplate.replaceAll('\$HOME', home);
+  }
 
-    final path = pathTemplate.replaceAll('\$HOME', homeDirectory);
-
-    final glob = Glob(path);
+  /// Expands a path template with environment variables and glob patterns.
+  static List<FileSystemEntity> expandPath(String pathTemplate) {
+    final glob = Glob(expandHome(pathTemplate));
     final matches = glob.listSync();
     return matches;
   }
 
+  /// Returns the directory [path] as a `Uri` with a trailing slash, or `null`
+  /// if it does not exist.
+  ///
+  /// This treats [path] as a literal, so paths containing
+  /// glob metacharacters (`[`, `{`, `,`, ...) are handled correctly. Use this
+  /// for values that come from the environment or a properties file, and
+  /// [expandPath] for the `*` templates defined in this class.
+  static Uri? _existingDir(String path) {
+    if (path.trim().isEmpty) {
+      return null;
+    }
+    final dir = Directory(path.trim());
+    return dir.existsSync() ? dir.uri : null;
+  }
+
+  /// Returns the NDK installations under an SDK root: every `ndk/<version>/`
+  /// directory plus the legacy `ndk-bundle/` directory.
+  static List<Uri> _ndkDirsInSdkRoot(Uri sdkRoot) {
+    final ndkDirs = <Uri>[];
+    final versioned = Directory.fromUri(sdkRoot.resolve('ndk/'));
+    if (versioned.existsSync()) {
+      for (final entry in versioned.listSync().whereType<Directory>()) {
+        ndkDirs.add(entry.uri);
+      }
+    }
+    final bundle = _existingDir(
+      Directory.fromUri(sdkRoot.resolve('ndk-bundle/')).path,
+    );
+    if (bundle != null) {
+      ndkDirs.add(bundle);
+    }
+    return ndkDirs;
+  }
+
+  /// Reads `sdk.dir` and `ndk.dir` from the `local.properties` of the Flutter
+  /// or Gradle project being built, if one can be found.
+  ///
+  /// [projectRoot] is the application directory; both `local.properties` and
+  /// `android/local.properties` are checked. This is the location Flutter and
+  /// Gradle themselves use, so it is authoritative when it is present, but it
+  /// is entirely optional - everything here is best effort.
+  static ({Uri? sdkDir, Uri? ndkDir}) readLocalProperties(
+    Uri projectRoot, {
+    Logger? logger,
+  }) {
+    for (final relative in const [
+      'local.properties',
+      'android/local.properties',
+    ]) {
+      final file = File.fromUri(projectRoot.resolve(relative));
+      if (!file.existsSync()) {
+        continue;
+      }
+      logger?.fine('Reading ${file.path}');
+      final props = <String, String>{};
+      for (final line in LineSplitter.split(file.readAsStringSync())) {
+        final trimmed = line.trim();
+        if (trimmed.startsWith('#')) {
+          continue;
+        }
+        final separator = trimmed.indexOf('=');
+        if (separator > 0) {
+          props[trimmed.substring(0, separator).trim()] = trimmed
+              .substring(separator + 1)
+              .trim();
+        }
+      }
+      final sdkDir = props['sdk.dir'];
+      final ndkDir = props['ndk.dir'];
+      if (sdkDir != null || ndkDir != null) {
+        return (
+          sdkDir: sdkDir == null ? null : _existingDir(sdkDir),
+          ndkDir: ndkDir == null ? null : _existingDir(ndkDir),
+        );
+      }
+    }
+    return (sdkDir: null, ndkDir: null);
+  }
+
+  /// Reads the `android-sdk` setting written by `flutter config --android-sdk`
+  /// from `~/.flutter_settings`, or `null` if it is not set.
+  static Uri? readFlutterSettingsSdk({Logger? logger}) {
+    final home = Platform.isWindows
+        ? Platform.environment['USERPROFILE']
+        : Platform.environment['HOME'];
+    if (home == null) {
+      return null;
+    }
+    final settings = File.fromUri(
+      Directory(home).uri.resolve('.flutter_settings'),
+    );
+    if (!settings.existsSync()) {
+      return null;
+    }
+    try {
+      final decoded = jsonDecode(settings.readAsStringSync());
+      if (decoded is Map && decoded['android-sdk'] is String) {
+        return _existingDir(decoded['android-sdk'] as String);
+      }
+    } catch (e) {
+      logger?.fine('Could not read ${settings.path}: $e');
+    }
+    return null;
+  }
+
+  /// Returns the root of the NDK that [compiler] (the NDK `clang` reported in
+  /// the build config by the Flutter tool) belongs to, or `null` if it does not
+  /// look like an NDK toolchain path.
+  ///
+  /// The layout is `<ndk>/toolchains/llvm/prebuilt/<host tag>/bin/clang`, so
+  /// this identifies both the exact NDK and the exact host tag the rest of the
+  /// build is using, which no environment scan can guarantee.
+  static Uri? ndkRootFromCompiler(Uri compiler) {
+    final ndkRoot = compiler.resolve('../../../../../');
+    final segments = compiler.pathSegments
+        .where((segment) => segment.isNotEmpty)
+        .toList();
+    if (segments.length < 6) {
+      return null;
+    }
+    final expected = segments.sublist(segments.length - 6, segments.length - 2);
+    if (expected[0] != 'toolchains' ||
+        expected[1] != 'llvm' ||
+        expected[2] != 'prebuilt') {
+      return null;
+    }
+    return _existingDir(Directory.fromUri(ndkRoot).path);
+  }
+
   static Future<NDKInfo> _getNDKInfo(Uri ndkPath, {Logger? logger}) async {
-    final sourceProps = File('${ndkPath.toFilePath()}source.properties');
+    // Add a trailing slash to make sure that relative paths resolve correctly.
+    if (!ndkPath.path.endsWith('/')) {
+      ndkPath = ndkPath.replace(path: '${ndkPath.path}/');
+    }
+    final sourceProps = File.fromUri(ndkPath.resolve('source.properties'));
     if (!sourceProps.existsSync()) {
       throw Exception(
         'NDK at ${ndkPath.toFilePath()} is missing source.properties',
@@ -420,8 +662,8 @@ class NDKLocator {
     final version = NKDVersion.parse(versionStr);
 
     // The toolchains directory contain subdirectories for each host arch
-    final toolchainsDir = Directory(
-      '${ndkPath.toFilePath()}toolchains/llvm/prebuilt/',
+    final toolchainsDir = Directory.fromUri(
+      ndkPath.resolve('toolchains/llvm/prebuilt/'),
     );
     if (!toolchainsDir.existsSync()) {
       throw Exception(
@@ -449,8 +691,8 @@ class NDKLocator {
     // The host arch directory contains
     // sysroot/usr/lib/<target arch> directories for each target arch
     for (final host in hostArchitectures) {
-      final sysrootLibDir = Directory(
-        '${host.llvmToolchainPath.toFilePath()}/sysroot/usr/lib/',
+      final sysrootLibDir = Directory.fromUri(
+        host.llvmToolchainPath.resolve('sysroot/usr/lib/'),
       );
       if (sysrootLibDir.existsSync()) {
         for (final targetDir
@@ -472,9 +714,7 @@ class NDKLocator {
     // e.g. sysroot/usr/lib/arm-linux-androideabi/21/
     for (final host in hostArchitectures) {
       for (final target in host.targetArchitectures) {
-        final targetLibDir = Directory(
-          '${target.sysrootLibPath.toFilePath()}/',
-        );
+        final targetLibDir = Directory.fromUri(target.sysrootLibPath);
         if (targetLibDir.existsSync()) {
           for (final apiLevelDir
               in targetLibDir.listSync().whereType<Directory>()) {
@@ -497,15 +737,51 @@ class NDKLocator {
     );
   }
 
-  /// Returns the path to the Android NDK, or `null` if it cannot be found.
-  static Future<List<NDKInfo>> locate({Logger? logger}) async {
+  /// Returns every usable Android NDK installation that could be found.
+  ///
+  /// [projectRoot], when given, is the root of the application being built and
+  /// enables reading `sdk.dir` / `ndk.dir` from its `local.properties`.
+  /// [extraNdkPaths] are tried before anything that is discovered, and are
+  /// intended for NDK roots that are already known (such as the one the Flutter
+  /// tool reported in the build config).
+  static Future<List<NDKInfo>> locate({
+    Logger? logger,
+    Uri? projectRoot,
+    Iterable<Uri> extraNdkPaths = const [],
+  }) async {
     final ndkPaths = <Uri>{};
+    final sdkRoots = <Uri>{};
+
+    void addNdkPath(Uri? path, String source) {
+      if (path == null) {
+        return;
+      }
+      if (ndkPaths.add(path)) {
+        logger?.fine('NDK candidate from $source: ${path.toFilePath()}');
+      }
+    }
+
+    void addSdkRoot(Uri? root, String source) {
+      if (root == null) {
+        return;
+      }
+      if (sdkRoots.add(root)) {
+        logger?.fine('SDK root from $source: ${root.toFilePath()}');
+      }
+    }
+
+    ndkPaths.addAll(extraNdkPaths);
+
     // first see if the exe is in path using which
     final whichResult = await which(_pathExe);
     if (whichResult != null) {
-      final ndkDir = whichResult.resolve('../');
+      // `ndk-build` sits in the root of the NDK, so the directory containing it
+      // is the NDK root. Resolving against a file Uri already drops the file
+      // name, so `./` is the containing directory and `../` would be its
+      // parent.
+      final ndkDir = whichResult.resolve('./');
       if (ndkDir.toFilePath() != whichResult.toFilePath()) {
-        ndkPaths.add(ndkDir);
+        addNdkPath(ndkDir, 'ndk-build on PATH');
       }
     }
 
@@ -513,37 +789,40 @@ class NDKLocator {
     for (final envVar in _ndkEnvVars) {
       final envValue = Platform.environment[envVar];
       if (envValue != null) {
-        final ndkDir = Directory(envValue);
-        if (ndkDir.existsSync()) {
-          ndkPaths.add(ndkDir.uri);
-        }
+        addNdkPath(_existingDir(envValue), '\$$envVar');
       }
     }
 
-    // try common install locations
-    for (final pathTemplate in _searchPaths) {
-      for (final match in expandPath(pathTemplate)) {
-        if (match is Directory) {
-          ndkPaths.add(match.uri);
-        }
-      }
+    // the project's own local.properties is what Flutter and Gradle use
+    if (projectRoot != null) {
+      final localProperties = readLocalProperties(projectRoot, logger: logger);
+      addNdkPath(localProperties.ndkDir, 'ndk.dir in local.properties');
+      addSdkRoot(localProperties.sdkDir, 'sdk.dir in local.properties');
     }
 
-    // finally, if we have an ANDROID_HOME, check for the NDK there
+    // SDK roots from the environment, from `flutter config --android-sdk`, and
+    // from the well known installation locations
     for (final envVar in _androidHomeEnvVars) {
       final envValue = Platform.environment[envVar];
       if (envValue != null) {
-        final androidHome = expandPath(envValue);
-        if (androidHome.isNotEmpty) {
-          final ndkDir = Directory('${androidHome.first.path}/ndk');
-          if (ndkDir.existsSync()) {
-            for (final match in expandPath('${ndkDir.path}/*/')) {
-              if (match is Directory) {
-                ndkPaths.add(match.uri);
-              }
-            }
-          }
-        }
+        addSdkRoot(_existingDir(envValue), '\$$envVar');
+      }
+    }
+    addSdkRoot(readFlutterSettingsSdk(logger: logger), '~/.flutter_settings');
+    for (final pathTemplate in _sdkSearchPaths) {
+      try {
+        addSdkRoot(
+          _existingDir(expandHome(pathTemplate)),
+          'well known install location',
+        );
+      } catch (e) {
+        logger?.fine('Could not expand $pathTemplate: $e');
+      }
+    }
+
+    for (final sdkRoot in sdkRoots) {
+      for (final ndkDir in _ndkDirsInSdkRoot(sdkRoot)) {
+        addNdkPath(ndkDir, 'SDK root ${sdkRoot.toFilePath()}');
       }
     }
 
@@ -568,44 +847,84 @@ class NDKLocator {
 /// This will return the NDKInfo with the highest version that supports the target
 /// architecture and minimum API level specified in the BuildConfig.
 extension FindNDKInfo on Iterable<NDKInfo> {
-  /// Finds the best matching NDKInfo for the given [config], or `null` if no suitable NDK is found.
-  NDKInfo? forBuildConfig(BuildConfig config) {
+  /// Finds every NDK that can supply libraries for [config], highest version
+  /// first.
+  ///
+  /// Each returned [NDKInfo] is filtered down to the matching host, target
+  /// architecture and API level. More than one is returned so that a caller can
+  /// move on to the next NDK when the highest versioned one turns out to be
+  /// incomplete.
+  List<NDKInfo> allForBuildConfig(BuildConfig config, {Logger? logger}) {
     final sorted = toList()..sort((a, b) => b.version.compareTo(a.version));
     final hostOS = HostOS.fromString(Platform.operatingSystem);
-    final targetArch = LibArch.fromString(
-      config.code.targetArchitecture.toString(),
-    );
+    if (hostOS == null) {
+      logger?.warning(
+        'Unsupported host OS for the Android NDK: ${Platform.operatingSystem}.',
+      );
+      return [];
+    }
+    final targetArchName = config.code.targetArchitecture.toString();
+    final targetArch = LibArch.fromString(targetArchName);
+    if (targetArch == null) {
+      logger?.warning(
+        'The Android NDK has no libraries for target architecture '
+        '$targetArchName.',
+      );
+      return [];
+    }
     final minApiLevel = config.code.android.targetNdkApi;
+    final matches = <NDKInfo>[];
     for (final ndk in sorted) {
-      final host = ndk.findHost(hostOS!);
-      if (host != null) {
-        final target = host.findTarget(targetArch!);
-        if (target != null) {
-          final apiLevel = target.highestMatching(minApiLevel);
-          if (apiLevel != null) {
-            // Return the filtered version.
-            return NDKInfo(
-              path: ndk.path,
-              version: ndk.version,
-              hostArchitectures: [
-                NDKHostArchitecture(
-                  host.os,
-                  host.arch,
-                  host.llvmToolchainPath,
-                  targetArchitectures: [
-                    NDKTargetArchitecture(
-                      target.arch,
-                      target.sysrootLibPath,
-                      apiLevels: [apiLevel],
-                    ),
-                  ],
+      final host = ndk.findHost(hostOS);
+      if (host == null) {
+        logger?.fine(
+          'NDK ${ndk.version} at ${ndk.path.toFilePath()} has no $hostOS host '
+          'toolchain.',
+        );
+        continue;
+      }
+      final target = host.findTarget(targetArch);
+      if (target == null) {
+        logger?.fine(
+          'NDK ${ndk.version} at ${ndk.path.toFilePath()} has no '
+          '${targetArch.toTriple()} libraries.',
+        );
+        continue;
+      }
+      final apiLevel = target.highestMatching(minApiLevel);
+      if (apiLevel == null) {
+        logger?.fine(
+          'NDK ${ndk.version} at ${ndk.path.toFilePath()} does not support API '
+          'level $minApiLevel for ${targetArch.toTriple()}.',
+        );
+        continue;
+      }
+      // Add the filtered version.
+      matches.add(
+        NDKInfo(
+          path: ndk.path,
+          version: ndk.version,
+          hostArchitectures: [
+            NDKHostArchitecture(
+              host.os,
+              host.arch,
+              host.llvmToolchainPath,
+              targetArchitectures: [
+                NDKTargetArchitecture(
+                  target.arch,
+                  target.sysrootLibPath,
+                  apiLevels: [apiLevel],
                 ),
               ],
-            );
-          }
-        }
-      }
+            ),
+          ],
+        ),
+      );
     }
-    return null;
+    return matches;
   }
+
+  /// Finds the best matching NDKInfo for the given [config], or `null` if no suitable NDK is found.
+  NDKInfo? forBuildConfig(BuildConfig config, {Logger? logger}) =>
+      allForBuildConfig(config, logger: logger).firstOrNull;
 }
