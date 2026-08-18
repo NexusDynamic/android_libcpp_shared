@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.0
+
+* Updated example to not use the kotlin gradle plugin (removing the warning when building the example)
+* **BREAKING**: Updated the `code_assets` dependency to `^2.0.0`, see [code_assets changelog](https://pub.dev/packages/code_assets/changelog#200)
+* Updated `hooks` to `^2.2.0`
+* Updated `native_toolchain_c` to `^0.19.4`
+* Updated `test` dev dependency to  `^1.31.2`
+
 ## 0.2.1
 
 * Fixed NDK path resolution on Windows by using `USERPROFILE` and normalizing path separators. Thanks @kekland and @AttalliAyoub for the PRs and Issue (#2).
