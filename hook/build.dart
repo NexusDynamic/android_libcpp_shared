@@ -25,7 +25,10 @@ void main(List<String> args) async {
         input.config.code.targetArchitecture;
 
     logger.info('Searching for android NDK...');
-    final ndkPaths = await NDKLocator.locate();
+    final ndkPaths = await NDKLocator.locate(
+      logger: logger,
+      config: input.config,
+    );
     final ndk = ndkPaths.forBuildConfig(input.config);
     if (ndk == null) {
       throw StateError(

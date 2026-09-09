@@ -353,12 +353,30 @@ final class NDKInfo {
 class NDKLocator {
   static final _searchPaths = [
     if (Platform.isLinux) ...[
-      '\$HOME/.androidsdkroot/ndk/*/', // Firebase Studio
-      '\$HOME/Android/Sdk/ndk/*/',
-      '\$HOME/Android/Sdk/ndk-bundle/',
+      r'$HOME/.androidsdkroot/ndk/*/', // Firebase Studio
+      r'$HOME/Android/Sdk/ndk/*/',
+      r'$HOME/Android/Sdk/ndk-bundle/',
+      r'$HOME/android-sdk/ndk/*/',
+      r'$HOME/android-sdk/ndk-bundle/',
+      r'$HOME/Android/sdk/ndk/*/',
+      r'$HOME/Android/sdk/ndk-bundle/',
+      '/usr/lib/android-sdk/ndk/*/',
+      '/opt/android-sdk/ndk/*/',
+      '/opt/android/ndk/*/',
+      '/usr/local/android-sdk/ndk/*/',
     ],
-    if (Platform.isMacOS) ...['\$HOME/Library/Android/sdk/ndk/*/'],
-    if (Platform.isWindows) ...['\$HOME/AppData/Local/Android/Sdk/ndk/*/'],
+    if (Platform.isMacOS) ...[
+      r'$HOME/Library/Android/sdk/ndk/*/',
+      r'$HOME/Library/Android/sdk/ndk-bundle/',
+      r'$HOME/Library/Android/Sdk/ndk/*/',
+      r'$HOME/Library/Android/Sdk/ndk-bundle/',
+    ],
+    if (Platform.isWindows) ...[
+      r'$HOME/AppData/Local/Android/Sdk/ndk/*/',
+      r'$HOME/AppData/Local/Android/Sdk/ndk-bundle/',
+      r'$HOME/AppData/Local/Android/sdk/ndk/*/',
+      r'$HOME/AppData/Local/Android/sdk/ndk-bundle/',
+    ],
   ];
 
   static final _ndkEnvVars = [
@@ -382,19 +400,113 @@ class NDKLocator {
     final homeDir = Platform.isWindows
         ? Platform.environment['USERPROFILE'] ?? ''
         : Platform.environment['HOME'] ?? '';
+    if (homeDir.isEmpty && pathTemplate.startsWith(r'$HOME')) {
+      return const [];
+    }
     // Glob requires forward slashes, and USERPROFILE uses backslashes
     final normalizedHomeDir = homeDir.replaceAll('\\', '/');
-    final path = pathTemplate.replaceAll('\$HOME', normalizedHomeDir);
-    final glob = Glob(path);
-    final matches = glob.listSync();
-    return matches;
+    final path = pathTemplate.replaceAll(r'$HOME', normalizedHomeDir);
+    if (!path.contains('*') && !path.contains('?')) {
+      final dir = Directory(path);
+      if (dir.existsSync()) {
+        return [dir];
+      }
+      return const [];
+    }
+    try {
+      final glob = Glob(path);
+      final matches = glob.listSync();
+      return matches;
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  /// Attempts to locate the NDK root directory from a compiler toolchain URI
+  /// (e.g. clang, ld, ar).
+  static Uri? findNdkFromTool(Uri toolUri) {
+    try {
+      var dir = Directory(toolUri.toFilePath());
+      for (var i = 0; i < 8; i++) {
+        if (dir.path == dir.parent.path) break;
+        dir = dir.parent;
+        final sep = Platform.pathSeparator;
+        final normPath = dir.path.endsWith(sep) ? dir.path : '${dir.path}$sep';
+        final sourceProps = File('${normPath}source.properties');
+        final toolchains = Directory('${normPath}toolchains');
+        if (sourceProps.existsSync() && toolchains.existsSync()) {
+          return dir.uri;
+        }
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  /// Attempts to find NDK or SDK paths specified in `local.properties` files.
+  static List<Uri> findNdksFromLocalProperties() {
+    final results = <Uri>[];
+    final sep = Platform.pathSeparator;
+    final searchDirs = <Directory>[
+      Directory.current,
+      Directory('${Directory.current.path}${sep}android'),
+    ];
+    var parent = Directory.current;
+    for (var i = 0; i < 5; i++) {
+      if (parent.path == parent.parent.path) break;
+      parent = parent.parent;
+      searchDirs.add(parent);
+      searchDirs.add(Directory('${parent.path}${sep}android'));
+    }
+    for (final dir in searchDirs) {
+      final lp = File('${dir.path}${sep}local.properties');
+      if (lp.existsSync()) {
+        try {
+          final lines = lp.readAsLinesSync();
+          for (final line in lines) {
+            final trimmed = line.trim();
+            if (trimmed.startsWith('#')) continue;
+            final eq = trimmed.indexOf('=');
+            if (eq > 0) {
+              final key = trimmed.substring(0, eq).trim();
+              var value = trimmed.substring(eq + 1).trim();
+              value = value.replaceAll(r'\:', ':').replaceAll(r'\\', r'\');
+              if (key == 'ndk.dir') {
+                final d = Directory(value);
+                if (d.existsSync()) results.add(d.uri);
+              } else if (key == 'sdk.dir') {
+                final sdkDir = Directory(value);
+                if (sdkDir.existsSync()) {
+                  final ndkSub = Directory('${sdkDir.path}${sep}ndk');
+                  if (ndkSub.existsSync()) {
+                    for (final ent in ndkSub.listSync().whereType<Directory>()) {
+                      results.add(ent.uri);
+                    }
+                  }
+                  final bundle = Directory('${sdkDir.path}${sep}ndk-bundle');
+                  if (bundle.existsSync()) {
+                    results.add(bundle.uri);
+                  }
+                }
+              }
+            }
+          }
+        } catch (_) {}
+      }
+    }
+    return results;
   }
 
   static Future<NDKInfo> _getNDKInfo(Uri ndkPath, {Logger? logger}) async {
-    final sourceProps = File('${ndkPath.toFilePath()}source.properties');
+    final ndkFilePath = ndkPath.toFilePath();
+    final sep = Platform.pathSeparator;
+    final normalizedNdkPath = ndkFilePath.endsWith(sep)
+        ? ndkFilePath
+        : '$ndkFilePath$sep';
+
+    final sourceProps = File('${normalizedNdkPath}source.properties');
     if (!sourceProps.existsSync()) {
       throw Exception(
-        'NDK at ${ndkPath.toFilePath()} is missing source.properties',
+        'NDK at $normalizedNdkPath is missing source.properties',
       );
     }
     final propsContent = await sourceProps.readAsString();
@@ -408,18 +520,18 @@ class NDKLocator {
     final versionStr = props['Pkg.Revision'];
     if (versionStr == null) {
       throw Exception(
-        'NDK at ${ndkPath.toFilePath()} is missing Pkg.Revision in source.properties',
+        'NDK at $normalizedNdkPath is missing Pkg.Revision in source.properties',
       );
     }
     final version = NKDVersion.parse(versionStr);
 
     // The toolchains directory contain subdirectories for each host arch
     final toolchainsDir = Directory(
-      '${ndkPath.toFilePath()}toolchains/llvm/prebuilt/',
+      '${normalizedNdkPath}toolchains${sep}llvm${sep}prebuilt$sep',
     );
     if (!toolchainsDir.existsSync()) {
       throw Exception(
-        'NDK at ${ndkPath.toFilePath()} is missing toolchains directory',
+        'NDK at $normalizedNdkPath is missing toolchains directory',
       );
     }
     final hostArchitectures = <NDKHostArchitecture>[];
@@ -444,7 +556,7 @@ class NDKLocator {
     // sysroot/usr/lib/<target arch> directories for each target arch
     for (final host in hostArchitectures) {
       final sysrootLibDir = Directory(
-        '${host.llvmToolchainPath.toFilePath()}/sysroot/usr/lib/',
+        '${host.llvmToolchainPath.toFilePath()}${sep}sysroot${sep}usr${sep}lib$sep',
       );
       if (sysrootLibDir.existsSync()) {
         for (final targetDir
@@ -467,7 +579,7 @@ class NDKLocator {
     for (final host in hostArchitectures) {
       for (final target in host.targetArchitectures) {
         final targetLibDir = Directory(
-          '${target.sysrootLibPath.toFilePath()}/',
+          '${target.sysrootLibPath.toFilePath()}$sep',
         );
         if (targetLibDir.existsSync()) {
           for (final apiLevelDir
@@ -492,9 +604,41 @@ class NDKLocator {
   }
 
   /// Returns the path to the Android NDK, or `null` if it cannot be found.
-  static Future<List<NDKInfo>> locate({Logger? logger}) async {
+  static Future<List<NDKInfo>> locate({
+    Logger? logger,
+    BuildConfig? config,
+  }) async {
     final ndkPaths = <Uri>{};
-    // first see if the exe is in path using which
+
+    // 0. First check if a compiler is specified in the BuildConfig
+    if (config != null) {
+      final cCompiler = config.code.cCompiler;
+      if (cCompiler != null) {
+        for (final toolUri in [
+          cCompiler.compiler,
+          cCompiler.archiver,
+          cCompiler.linker,
+        ]) {
+          if (toolUri != null) {
+            final ndk = findNdkFromTool(toolUri);
+            if (ndk != null) {
+              logger?.info(
+                'Found NDK from compiler config: ${ndk.toFilePath()}',
+              );
+              ndkPaths.add(ndk);
+              break;
+            }
+          }
+        }
+      }
+    }
+
+    // 1. Check local.properties in current and parent directories
+    for (final ndkUri in findNdksFromLocalProperties()) {
+      ndkPaths.add(ndkUri);
+    }
+
+    // 2. See if the exe is in path using which
     final whichResult = await which(_pathExe);
     if (whichResult != null) {
       final ndkDir = whichResult.resolve('../');
@@ -503,40 +647,52 @@ class NDKLocator {
       }
     }
 
-    // then check environment variables
+    // 3. Check environment variables
     for (final envVar in _ndkEnvVars) {
-      final envValue = Platform.environment[envVar];
-      if (envValue != null) {
+      final envValue = Platform.environment[envVar]?.trim();
+      if (envValue != null && envValue.isNotEmpty) {
         final ndkDir = Directory(envValue);
         if (ndkDir.existsSync()) {
-          ndkPaths.add(ndkDir.uri);
-        }
-      }
-    }
-
-    // try common install locations
-    for (final pathTemplate in _searchPaths) {
-      for (final match in expandPath(pathTemplate)) {
-        if (match is Directory) {
-          ndkPaths.add(match.uri);
-        }
-      }
-    }
-
-    // finally, if we have an ANDROID_HOME, check for the NDK there
-    for (final envVar in _androidHomeEnvVars) {
-      final envValue = Platform.environment[envVar];
-      if (envValue != null) {
-        final androidHome = expandPath(envValue);
-        if (androidHome.isNotEmpty) {
-          final ndkDir = Directory('${androidHome.first.path}/ndk');
-          if (ndkDir.existsSync()) {
-            for (final match in expandPath('${ndkDir.path}/*/')) {
-              if (match is Directory) {
+          final sep = Platform.pathSeparator;
+          if (File('${ndkDir.path}${sep}source.properties').existsSync()) {
+            ndkPaths.add(ndkDir.uri);
+          } else {
+            for (final match in ndkDir.listSync().whereType<Directory>()) {
+              if (File('${match.path}${sep}source.properties').existsSync()) {
                 ndkPaths.add(match.uri);
               }
             }
           }
+        }
+      }
+    }
+
+    // 4. Finally, if we have an ANDROID_HOME / ANDROID_SDK_ROOT, check for the NDK there
+    for (final envVar in _androidHomeEnvVars) {
+      final envValue = Platform.environment[envVar]?.trim();
+      if (envValue != null && envValue.isNotEmpty) {
+        final sdkDir = Directory(envValue);
+        if (sdkDir.existsSync()) {
+          final sep = Platform.pathSeparator;
+          final ndkDir = Directory('${sdkDir.path}${sep}ndk');
+          if (ndkDir.existsSync()) {
+            for (final entry in ndkDir.listSync().whereType<Directory>()) {
+              ndkPaths.add(entry.uri);
+            }
+          }
+          final ndkBundle = Directory('${sdkDir.path}${sep}ndk-bundle');
+          if (ndkBundle.existsSync()) {
+            ndkPaths.add(ndkBundle.uri);
+          }
+        }
+      }
+    }
+
+    // 5. Try common install locations
+    for (final pathTemplate in _searchPaths) {
+      for (final match in expandPath(pathTemplate)) {
+        if (match is Directory) {
+          ndkPaths.add(match.uri);
         }
       }
     }
@@ -564,7 +720,19 @@ class NDKLocator {
 extension FindNDKInfo on Iterable<NDKInfo> {
   /// Finds the best matching NDKInfo for the given [config], or `null` if no suitable NDK is found.
   NDKInfo? forBuildConfig(BuildConfig config) {
-    final sorted = toList()..sort((a, b) => b.version.compareTo(a.version));
+    // If a compiler was specified, try to find the NDK that matches the compiler's path first
+    final compiler = config.code.cCompiler?.compiler;
+    final compilerNdkUri =
+        compiler != null ? NDKLocator.findNdkFromTool(compiler) : null;
+
+    final sorted = toList()..sort((a, b) {
+      if (compilerNdkUri != null) {
+        if (a.path == compilerNdkUri) return -1;
+        if (b.path == compilerNdkUri) return 1;
+      }
+      return b.version.compareTo(a.version);
+    });
+
     final hostOS = HostOS.fromString(Platform.operatingSystem);
     final targetArch = LibArch.fromString(
       config.code.targetArchitecture.toString(),
@@ -575,8 +743,16 @@ extension FindNDKInfo on Iterable<NDKInfo> {
       if (host != null) {
         final target = host.findTarget(targetArch!);
         if (target != null) {
-          final apiLevel = target.highestMatching(minApiLevel);
-          if (apiLevel != null) {
+          final apiLevel = target.highestMatching(minApiLevel) ??
+              (target.apiLevels.isNotEmpty
+                  ? target.apiLevels.first
+                  : NDKApiLevel(minApiLevel, target.sysrootLibPath));
+
+          // Ensure libc++_shared.so actually exists
+          final libcppFile = File.fromUri(
+            target.sysrootLibPath.resolve('libc++_shared.so'),
+          );
+          if (libcppFile.existsSync()) {
             // Return the filtered version.
             return NDKInfo(
               path: ndk.path,

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.2
+
+* Fixed NDK path resolution by supporting BuildConfig compiler toolchain, local.properties, additional Linux/macOS/Windows search paths, and robust fallback.
+
 ## 0.2.1
 
 * Fixed NDK path resolution on Windows by using `USERPROFILE` and normalizing path separators.
