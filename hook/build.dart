@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:android_libcpp_shared/src/resolve_libcpp.dart';
 import 'package:code_assets/code_assets.dart';
 import 'package:hooks/hooks.dart';
@@ -44,11 +46,20 @@ void main(List<String> args) async {
     // Re-run the hook if the library path changes
     output.dependencies.add(libcppSharedPath);
 
+    // Bundle a copy owned by this hook. The Flutter tool records asset files
+    // as build outputs and deletes stale ones, which must never hit the NDK.
+    final bundledLibcppShared = input.outputDirectory.resolve(
+      'libc++_shared.so',
+    );
+    final sourceFile = File.fromUri(libcppSharedPath);
+    final bundledFile = File.fromUri(bundledLibcppShared);
+    await sourceFile.copy(bundledFile.path);
+
     output.assets.code.add(
       CodeAsset(
         package: input.packageName,
         name: 'libc++_shared.so',
-        file: libcppSharedPath,
+        file: bundledLibcppShared,
         linkMode: DynamicLoadingBundled(),
       ),
     );
