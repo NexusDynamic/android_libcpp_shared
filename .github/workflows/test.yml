@@ -1,0 +1,46 @@
+name: Test
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+  # Reused by release.yml: nothing is published unless this passes.
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    # NDK discovery differs per host, and every hosted image ships an Android
+    # NDK, which the locator tests need.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Dart
+        uses: dart-lang/setup-dart@v1
+        with:
+          sdk: stable
+
+      - name: Get dependencies
+        run: dart pub get
+
+      - name: Check formatting
+        if: runner.os == 'Linux'
+        run: dart format --output=none --set-exit-if-changed lib hook test
+
+      # example/ is a Flutter app and does not resolve with the plain Dart SDK.
+      - name: Analyze code
+        if: runner.os == 'Linux'
+        run: dart analyze lib hook test
+
+      - name: Run tests
+        run: dart test

@@ -1,0 +1,131 @@
+name: Release
+
+# Started by pushing a `v<version>` tag that matches the version in pubspec.yaml:
+#
+#   check → test → pub.dev → GitHub release
+
+on:
+  push:
+    tags: [ 'v[0-9]*' ]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Check tag against pubspec
+        id: version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          VERSION="$(awk '$1 == "version:" { print $2; exit }' pubspec.yaml)"
+          if [ "$TAG" != "v$VERSION" ]; then
+            echo "::error::Tag $TAG does not match pubspec version $VERSION (expected v$VERSION)"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          case "$VERSION" in
+            *-*) echo "prerelease=true" >> "$GITHUB_OUTPUT" ;;
+            *) echo "prerelease=false" >> "$GITHUB_OUTPUT" ;;
+          esac
+
+  test:
+    needs: check
+    uses: ./.github/workflows/test.yml
+
+  pub-publish:
+    needs: [check, test]
+    runs-on: ubuntu-latest
+    # Optional protection: pub.dev can require this environment, and GitHub can
+    # require a reviewer for it (Settings → Environments → pub.dev).
+    environment: pub.dev
+    permissions:
+      contents: read
+      id-token: write # pub.dev automated publishing (OIDC)
+    env:
+      VERSION: ${{ needs.check.outputs.version }}
+    steps:
+      # A version uploaded by hand or by an earlier attempt of this workflow is
+      # not published again, so its tag still gets a GitHub release.
+      - name: Check pub.dev for this version
+        id: pubdev
+        run: |
+          STATUS="$(curl -s -o /dev/null -w '%{http_code}' "https://pub.dev/api/packages/android_libcpp_shared/versions/$VERSION")"
+          case "$STATUS" in
+            200)
+              echo "::notice::android_libcpp_shared $VERSION is already on pub.dev; not publishing it again."
+              echo "published=true" >> "$GITHUB_OUTPUT"
+              ;;
+            404)
+              echo "published=false" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "::error::pub.dev answered HTTP $STATUS for android_libcpp_shared $VERSION"
+              exit 1
+              ;;
+          esac
+
+      - uses: actions/checkout@v6
+        if: steps.pubdev.outputs.published != 'true'
+
+      # Also exchanges the GitHub OIDC token for a pub.dev one.
+      - name: Setup Dart
+        if: steps.pubdev.outputs.published != 'true'
+        uses: dart-lang/setup-dart@v1
+        with:
+          sdk: stable
+
+      - name: Get dependencies
+        if: steps.pubdev.outputs.published != 'true'
+        run: dart pub get
+
+      - name: Dry run
+        if: steps.pubdev.outputs.published != 'true'
+        run: dart pub publish --dry-run
+
+      - name: Publish
+        if: steps.pubdev.outputs.published != 'true'
+        run: dart pub publish --force
+
+  github-release:
+    needs: [check, test, pub-publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Release notes from CHANGELOG
+        run: |
+          {
+            awk -v version="$VERSION" '
+              /^## / { if (in_section) exit; if ($2 == version) { in_section = 1; next } }
+              in_section { print }
+            ' CHANGELOG.md
+            echo ""
+            echo "Published on pub.dev: https://pub.dev/packages/android_libcpp_shared/versions/$VERSION"
+            echo ""
+            echo "Full changelog: https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/CHANGELOG.md"
+          } > release_notes.md
+          cat release_notes.md
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          body_path: release_notes.md
+          prerelease: ${{ needs.check.outputs.prerelease == 'true' }}
