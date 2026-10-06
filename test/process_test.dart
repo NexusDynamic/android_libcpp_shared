@@ -8,7 +8,9 @@ void main() {
     final result = await runProcess(
       executable: Uri.file(Platform.isWindows ? 'cmd' : 'echo'),
       arguments: Platform.isWindows
-          ? ['/c', 'echo', 'Hello, World!']
+          // Separate arguments: one containing a space would be quoted, and
+          // cmd's echo prints the quotes.
+          ? ['/c', 'echo', 'Hello,', 'World!']
           : ['Hello, World!'],
     );
     expect(result.exitCode, 0);
@@ -20,7 +22,8 @@ void main() {
     final result = await runProcess(
       executable: Uri.file(Platform.isWindows ? 'cmd' : 'ls'),
       arguments: Platform.isWindows
-          ? ['/c', 'dir', 'non_existent_directory']
+          // Unlike `dir`, `type` prints nothing to stdout when it fails.
+          ? ['/c', 'type', 'non_existent_file']
           : ['non_existent_directory'],
     );
     expect(result.exitCode, isNonZero);

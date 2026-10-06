@@ -207,7 +207,7 @@ void main() {
 
       expect(resolved, isNotNull);
       expect(
-        resolved!.toFilePath(),
+        resolved!.path,
         contains('sources/cxx-stl/llvm-libc++/libs/arm64-v8a'),
       );
     });
