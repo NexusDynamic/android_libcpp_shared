@@ -30,14 +30,14 @@ jobs:
         with:
           sdk: stable
 
+      # example/ is a Flutter app and does not resolve with the plain Dart SDK.
       - name: Get dependencies
-        run: dart pub get
+        run: dart pub get --no-example
 
       - name: Check formatting
         if: runner.os == 'Linux'
         run: dart format --output=none --set-exit-if-changed lib hook test
 
-      # example/ is a Flutter app and does not resolve with the plain Dart SDK.
       - name: Analyze code
         if: runner.os == 'Linux'
         run: dart analyze lib hook test
