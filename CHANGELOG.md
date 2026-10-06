@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.1
+
+* Copy the shared library to the build output dir PR from @MSOB7YY (https://github.com/NexusDynamic/android_libcpp_shared/pull/9)
+
 ## 0.3.0
 
 * Updated example to not use the kotlin gradle plugin (removing the warning when building the example)
